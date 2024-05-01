@@ -1,96 +1,148 @@
-use std::fs::File;
-use std::io::{self, Read, Write, Seek};
-use std::sync::{Arc, Mutex};
-use std::thread;
-use zstd::stream::write::Encoder;
+use std::env;
+use std::fs::{self, File};
+use std::io::{self, BufRead, Write};
+use std::path::{Path, PathBuf};
+use zstd::stream::{Encoder, Decoder};
 
-const CHUNK_SIZE: usize = 1024 * 1024 * 10; // 10 MB
+fn main() {
+    // Owner and GitHub URL
+    let owner = "Aly Ahmed Aly";
+    let github_url = "https://github.com/King-Masr/Poius";
 
-// Compression function
-fn compress_file(source_path: &str, destination_path: &str) -> io::Result<()> {
-    let source_file = File::open(source_path)?;
-    let mut destination_file = File::create(destination_path)?;
-    let source_file_metadata = source_file.metadata()?;
-    let encoder = Encoder::new(&mut destination_file, 0)?;
+    // Parsing command-line arguments
+    let args: Vec<String> = env::args().collect();
+    let command = args.get(1).map(|s| s.as_str()).unwrap_or("");
+    let path = args.get(2).map(|s| s.as_str()).unwrap_or("");
 
-    let num_chunks = (source_file_metadata.len() as f64 / CHUNK_SIZE as f64).ceil() as usize;
-    let mut handles = vec![];
-
-    for i in 0..num_chunks {
-        let start = i * CHUNK_SIZE;
-        let end = std::cmp::min((i + 1) * CHUNK_SIZE, source_file_metadata.len() as usize);
-
-        let mut source_chunk = vec![0; end - start];
-        let mut source_file_clone = source_file.try_clone()?;
-        source_file_clone.seek(std::io::SeekFrom::Start(start as u64))?;
-        source_file_clone.read_exact(&mut source_chunk)?;
-
-        let source_chunk_arc = Arc::new(Mutex::new(source_chunk));
-        let compressed_chunk_arc = Arc::new(Mutex::new(Vec::new()));
-
-        let encoder_handle = {
-            let source_chunk_arc = source_chunk_arc.clone();
-            let compressed_chunk_arc = compressed_chunk_arc.clone();
-            thread::spawn(move || {
-                let mut encoder = Encoder::new(Vec::new(), 0).unwrap();
-                let source_chunk = source_chunk_arc.lock().unwrap();
-                encoder.write_all(&*source_chunk).unwrap();
-                let compressed_chunk = encoder.finish().unwrap();
-                let mut compressed_chunk_guard = compressed_chunk_arc.lock().unwrap();
-                compressed_chunk_guard.extend_from_slice(&compressed_chunk);
-            })
-        };
-
-        handles.push(encoder_handle);
+    // Default command for the CLI
+    if command.is_empty() {
+        println!("Welcome to poius CLI by {}.", owner);
+        println!("Usage: poius <command> <path>");
+        println!("Commands:");
+        println!("  compress <file/dir>: Compress a file or directory");
+        println!("  decompress <file/dir>: Decompress a file or directory");
+        println!("  help: Display this help message");
+        println!("For more information, visit {}", github_url);
+        return;
     }
 
-    for handle in handles {
-        handle.join().unwrap();
-    }
-
-    let compressed_file = encoder.finish().unwrap();
-    compressed_file.write_all(&source_file_metadata.len().to_le_bytes())?;
-
-    Ok(())
-}
-
-// Decompression function
-fn decompress_file(source_path: &str, destination_path: &str) -> io::Result<()> {
-    let source_file = File::open(source_path)?;
-    let mut destination_file = File::create(destination_path)?;
-    let mut source_file = io::BufReader::new(source_file);
-
-    let mut decoder = zstd::stream::read::Decoder::new(&mut source_file)?;
-    io::copy(&mut decoder, &mut destination_file)?;
-
-    Ok(())
-}
-
-fn main() -> io::Result<()> {
-    let args: Vec<String> = std::env::args().collect();
-    if args.len() < 4 {
-        eprintln!("Usage: {} <action> <source_file> <destination_file>", args[0]);
-        std::process::exit(1);
-    }
-
-    let action = &args[1];
-    let source_file = &args[2];
-    let destination_file = &args[3];
-
-    match action.as_str() {
+    // Handling compress, decompress, and help commands
+    match command {
         "compress" => {
-            compress_file(source_file, destination_file)?;
-            println!("File compressed successfully.");
+            if path.is_empty() {
+                println!("File or directory path not provided.");
+                return;
+            }
+            if let Err(err) = compress(path) {
+                println!("{}", err);
+            }
         }
         "decompress" => {
-            decompress_file(source_file, destination_file)?;
-            println!("File decompressed successfully.");
+            if path.is_empty() {
+                println!("File or directory path not provided.");
+                return;
+            }
+            if let Err(err) = decompress(path) {
+                println!("{}", err);
+            }
         }
-        _ => {
-            eprintln!("Invalid action. Use 'compress' or 'decompress'.");
-            std::process::exit(1);
+        "help" => {
+            println!("Usage: poius <command> <path>");
+            println!("Commands:");
+            println!("  compress <file/dir>: Compress a file or directory");
+            println!("  decompress <file/dir>: Decompress a file or directory");
+            println!("  help: Display this help message");
+            println!("For more information, visit {}", github_url);
+        }
+        _ => println!("Invalid command. Use 'compress', 'decompress', or 'help'."),
+    }
+}
+
+// Compression function for a file or directory
+fn compress(path: &str) -> io::Result<()> {
+    let source_path = PathBuf::from(path);
+    if !source_path.exists() {
+        println!("File or directory not found.");
+        return Ok(());
+    }
+
+    let mut compressed_path = source_path.clone();
+    compressed_path.set_extension("zst");
+
+    let mut compressed_file = File::create(&compressed_path)?;
+
+    let mut encoder = Encoder::new(&mut compressed_file, 0)?;
+
+    if source_path.is_file() {
+        let mut source_file = File::open(&source_path)?;
+        io::copy(&mut source_file, &mut encoder)?;
+    } else if source_path.is_dir() {
+        let files = get_files_in_directory(&source_path)?;
+        for file in files {
+            let rel_path = file.strip_prefix(&source_path).unwrap();
+            encoder.write_all(rel_path.to_str().unwrap().as_bytes())?;
+            encoder.write_all(&[0])?;
+
+            let mut source_file = File::open(&file)?;
+            io::copy(&mut source_file, &mut encoder)?;
         }
     }
 
+    encoder.finish()?;
+    println!("Compression successful. Compressed file: {:?}", compressed_path);
+
     Ok(())
+}
+
+// Decompression function for a file or directory
+fn decompress(path: &str) -> io::Result<()> {
+    let source_path = PathBuf::from(path);
+    if !source_path.exists() {
+        println!("File or directory not found.");
+        return Ok(());
+    }
+
+    let mut decompressed_path = source_path.clone();
+    decompressed_path.set_extension(""); // Remove the extension
+
+    let mut decompressed_file = File::create(&decompressed_path)?;
+
+    let mut decoder = Decoder::new(File::open(&source_path)?)?;
+
+    if source_path.is_file() {
+        io::copy(&mut decoder, &mut decompressed_file)?;
+    } else if source_path.is_dir() {
+        let mut buf_reader = io::BufReader::new(decoder);
+        loop {
+            let mut path_buf = String::new();
+            buf_reader.read_line(&mut path_buf)?;
+            if path_buf.trim().is_empty() {
+                break;
+            }
+            let dest_path = decompressed_path.join(path_buf.trim());
+            if let Some(parent) = dest_path.parent() {
+                fs::create_dir_all(parent)?;
+            }
+            let mut dest_file = File::create(&dest_path)?;
+            io::copy(&mut buf_reader, &mut dest_file)?;
+        }
+    }
+
+    println!("Decompression successful. Decompressed file: {:?}", decompressed_path);
+
+    Ok(())
+}
+
+// Helper function to get all files in a directory
+fn get_files_in_directory(dir: &Path) -> io::Result<Vec<PathBuf>> {
+    let mut files = Vec::new();
+    let entries = fs::read_dir(dir)?;
+    for entry in entries {
+        let entry = entry?;
+        let path = entry.path();
+        if path.is_file() {
+            files.push(path);
+        }
+    }
+    Ok(files)
 }
