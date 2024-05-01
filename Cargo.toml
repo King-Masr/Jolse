@@ -1,0 +1,18 @@
+[package]
+name = "jolse"
+version = "0.1.4"
+authors = ["Aly Ahmed Aly <aaly28623@gmail.com>"]
+edition = "2021"
+rust-version = "1.77.2"
+description = "jolse is a command-line interface (CLI) tool written in Rust for encoding and decoding files and directories using base64 encoding."
+documentation = "https://docs.rs/jolse"
+readme = "README.md"
+repository = "https://github.com/King-Masr/Jolse"
+license = "MIT"
+keywords = ["jolse", "rust"]
+categories = ["rust"]
+
+# See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
+
+[dependencies]
+zstd = "0.13.1"
